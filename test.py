@@ -212,10 +212,10 @@ async def process_cost(message: types.Message, state: FSMContext):
         data['photos'] = []
         data['videos'] = []
     await NewWork.next()
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton("Пропустить 📸"))
-    keyboard.add(KeyboardButton("Готово ✅"))
-    await message.reply("Отправьте фото пациента (можно несколько). Нажмите 'Готово', когда закончите, или 'Пропустить', если фото не нужны.", reply_markup=keyboard)
+    await message.reply("Отправьте фото пациента (можно несколько).", reply_markup=InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Пропустить 📸", callback_data="skip_photos"),
+        InlineKeyboardButton("Готово ✅", callback_data="finish_photos")
+    ))
 
 # Обработка фото
 @dp.message_handler(content_types=['photo'], state=NewWork.photos)
@@ -224,21 +224,21 @@ async def process_photos(message: types.Message, state: FSMContext):
         data['photos'].append(message.photo[-1].file_id)
     await message.reply("Фото добавлено. Отправьте еще или нажмите 'Готово'.")
 
-@dp.message_handler(Text(equals="Готово ✅"), state=NewWork.photos)
-async def finish_photos(message: types.Message, state: FSMContext):
+@dp.callback_query_handler(Text(equals="finish_photos"), state=NewWork.photos)
+async def finish_photos(callback_query: types.CallbackQuery, state: FSMContext):
     await NewWork.next()
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton("Пропустить 📹"))
-    keyboard.add(KeyboardButton("Готово ✅"))
-    await message.reply("Отправьте видео (можно несколько). Нажмите 'Готово', когда закончите, или 'Пропустить', если видео не нужны.", reply_markup=keyboard)
+    await callback_query.message.reply("Отправьте видео (можно несколько).", reply_markup=InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Пропустить 📹", callback_data="skip_videos"),
+        InlineKeyboardButton("Готово ✅", callback_data="finish_videos")
+    ))
 
-@dp.message_handler(Text(equals="Пропустить 📸"), state=NewWork.photos)
-async def skip_photos(message: types.Message, state: FSMContext):
+@dp.callback_query_handler(Text(equals="skip_photos"), state=NewWork.photos)
+async def skip_photos(callback_query: types.CallbackQuery, state: FSMContext):
     await NewWork.next()
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton("Пропустить 📹"))
-    keyboard.add(KeyboardButton("Готово ✅"))
-    await message.reply("Отправьте видео (можно несколько). Нажмите 'Готово', когда закончите, или 'Пропустить', если видео не нужны.", reply_markup=keyboard)
+    await callback_query.message.reply("Отправьте видео (можно несколько).", reply_markup=InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Пропустить 📹", callback_data="skip_videos"),
+        InlineKeyboardButton("Готово ✅", callback_data="finish_videos")
+    ))
 
 # Обработка видео
 @dp.message_handler(content_types=['video'], state=NewWork.videos)
@@ -247,15 +247,15 @@ async def process_videos(message: types.Message, state: FSMContext):
         data['videos'].append(message.video.file_id)
     await message.reply("Видео добавлено. Отправьте еще или нажмите 'Готово'.")
 
-@dp.message_handler(Text(equals="Готово ✅"), state=NewWork.videos)
-async def finish_videos(message: types.Message, state: FSMContext):
+@dp.callback_query_handler(Text(equals="finish_videos"), state=NewWork.videos)
+async def finish_videos(callback_query: types.CallbackQuery, state: FSMContext):
     await NewWork.next()
-    await show_technicians(message, state)
+    await show_technicians(callback_query.message, state)
 
-@dp.message_handler(Text(equals="Пропустить 📹"), state=NewWork.videos)
-async def skip_videos(message: types.Message, state: FSMContext):
+@dp.callback_query_handler(Text(equals="skip_videos"), state=NewWork.videos)
+async def skip_videos(callback_query: types.CallbackQuery, state: FSMContext):
     await NewWork.next()
-    await show_technicians(message, state)
+    await show_technicians(callback_query.message, state)
 
 # Выбор техника
 async def show_technicians(message: types.Message, state: FSMContext):
@@ -310,15 +310,35 @@ async def list_active_works_dentist(message: types.Message):
     if get_user_group(message.from_user.id) != 'dentist':
         await message.reply("Эта функция доступна только стоматологам.")
         return
-    cursor.execute("SELECT work_id, patient_name FROM works WHERE dentist_id = ? AND status = 'active'", (message.from_user.id,))
+    cursor.execute("""
+    SELECT DISTINCT u.profile_name, u.telegram_id
+    FROM users u
+    JOIN works w ON u.telegram_id = w.technician_id
+    WHERE w.dentist_id = ? AND w.status = 'active'
+    """, (message.from_user.id,))
+    technicians = cursor.fetchall()
+    if not technicians:
+        await message.reply("У вас нет активных работ.")
+        return
+    keyboard = InlineKeyboardMarkup()
+    for tech_name, tech_id in technicians:
+        keyboard.add(InlineKeyboardButton(tech_name, callback_data=f"tech_works_{tech_id}"))
+    await message.reply("<b>Техники с вашими активными работами:</b>", parse_mode="HTML", reply_markup=keyboard)
+
+# Обработчик выбора техника для стоматолога
+@dp.callback_query_handler(lambda c: c.data.startswith('tech_works_'))
+async def list_works_by_technician(callback_query: types.CallbackQuery):
+    tech_id = int(callback_query.data.split('_')[2])
+    dentist_id = callback_query.from_user.id
+    cursor.execute("SELECT work_id, patient_name FROM works WHERE dentist_id = ? AND technician_id = ? AND status = 'active'", (dentist_id, tech_id))
     works = cursor.fetchall()
     if not works:
-        await message.reply("У вас нет активных работ.")
+        await callback_query.message.reply("У этого техника нет ваших активных работ.")
         return
     keyboard = InlineKeyboardMarkup()
     for work_id, patient_name in works:
         keyboard.add(InlineKeyboardButton(f"Работа для {patient_name}", callback_data=f"work_{work_id}"))
-    await message.reply("<b>Ваши активные работы:</b>", parse_mode="HTML", reply_markup=keyboard)
+    await callback_query.message.reply(f"<b>Активные работы у {get_profile_name(tech_id)}:</b>", parse_mode="HTML", reply_markup=keyboard)
 
 # Архив работ (стоматолог)
 @dp.message_handler(Text(equals="Архив работ 🗄️"), state='*')
@@ -394,6 +414,9 @@ async def show_work_details(callback_query: types.CallbackQuery):
     cursor.execute("SELECT profile_name FROM users WHERE telegram_id = ?", (work[8],))
     dentist_name = cursor.fetchone()[0]
     message += f"Стоматолог: {dentist_name}\n"
+    cursor.execute("SELECT profile_name FROM users WHERE telegram_id = ?", (work[9],))
+    technician_name = cursor.fetchone()[0]
+    message += f"Техник: {technician_name}\n"
     await bot.send_message(callback_query.from_user.id, message, parse_mode="HTML")
     cursor.execute("SELECT file_id FROM photos WHERE work_id = ?", (work_id,))
     photos = cursor.fetchall()
